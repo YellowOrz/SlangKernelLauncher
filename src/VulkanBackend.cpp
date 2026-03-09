@@ -457,6 +457,40 @@ bool dispatchVulkanBound(const VulkanContext&  ctx,
     return true;
 }
 
+bool dispatchVulkanAsync(const VulkanContext&  ctx,
+                          const VulkanFunction& fn,
+                          VkDescriptorSet       descriptorSet,
+                          VkCommandBuffer       cmd,
+                          VkFence               fence,
+                          uint32_t              gx,
+                          uint32_t              gy,
+                          uint32_t              gz)
+{
+    // 录制 — 与同步版本相同，但 submit 时挂 fence，不等待
+    vkResetCommandBuffer(cmd, 0);
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &beginInfo);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fn.pipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                             fn.pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdDispatch(cmd, gx, gy, gz);
+
+    vkEndCommandBuffer(cmd);
+
+    VkSubmitInfo si{};
+    si.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers    = &cmd;
+
+    // fence 标记 GPU 执行完成，调用方通过 vkWaitForFences 获取结果
+    vkQueueSubmit(ctx.computeQueue, 1, &si, fence);
+    return true;
+}
+
 bool dispatchVulkan(const VulkanContext&              ctx,
                     const VulkanFunction&             fn,
                     const std::vector<VulkanBuffer*>& buffers,

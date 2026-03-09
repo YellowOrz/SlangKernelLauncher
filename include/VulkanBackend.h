@@ -101,10 +101,23 @@ bool bindVulkanBuffers(const VulkanFunction&             fn,
                        VkDescriptorSet&                  outSet);
 
 // ② 多次 dispatch：使用已绑定的 descriptor set，不重新分配资源。
-//    适合在同一组 buffer 上反复调用（仅录制命令 → 提交 → 等待）。
+//    同步版本：录制 → 提交 → vkQueueWaitIdle，返回时 GPU 已完成。
 bool dispatchVulkanBound(const VulkanContext&  ctx,
                           const VulkanFunction& fn,
                           VkDescriptorSet       descriptorSet,
+                          uint32_t              gx,
+                          uint32_t              gy = 1,
+                          uint32_t              gz = 1);
+
+// ② 异步版本：录制 → 提交（attach fence），立即返回，GPU 在后台执行。
+//    cmd:   调用方预分配的可复用 command buffer（submit 前须已 reset）
+//    fence: 调用方持有的 fence（submit 前须为 unsignaled，由调用方在 wait 后 reset）
+//    用 vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX) 等待完成。
+bool dispatchVulkanAsync(const VulkanContext&  ctx,
+                          const VulkanFunction& fn,
+                          VkDescriptorSet       descriptorSet,
+                          VkCommandBuffer       cmd,
+                          VkFence               fence,
                           uint32_t              gx,
                           uint32_t              gy = 1,
                           uint32_t              gz = 1);

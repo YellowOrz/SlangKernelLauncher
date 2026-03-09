@@ -86,16 +86,17 @@ struct KernelRunner<KernelID, CPU>
 template<auto KernelID>
 struct KernelRunner<KernelID, CUDA>
 {
+    // stream == nullptr → 默认流（同步语义）；传入显式 stream → 异步执行
     static bool dispatch(const CUDAFunction& fn, void** kernelArgs,
                          uint32_t gx, uint32_t gy = 1, uint32_t gz = 1,
-                         uint32_t blockX = 64, uint32_t blockY = 1, uint32_t blockZ = 1)
+                         uint32_t blockX = 64, uint32_t blockY = 1, uint32_t blockZ = 1,
+                         CUstream stream = nullptr)
     {
-        CUresult r = cuLaunchKernel(fn.function,
-                                     gx, gy, gz,
-                                     blockX, blockY, blockZ,
-                                     0, nullptr,
-                                     kernelArgs, nullptr);
-        return r == CUDA_SUCCESS;
+        return cuLaunchKernel(fn.function,
+                              gx, gy, gz,
+                              blockX, blockY, blockZ,
+                              0, stream,
+                              kernelArgs, nullptr) == CUDA_SUCCESS;
     }
 };
 #endif // SKL_HAS_CUDA_DRIVER
@@ -114,11 +115,21 @@ namespace skl {
 template<auto KernelID>
 struct KernelRunner<KernelID, Vulkan>
 {
+    // 同步：录制 → 提交 → vkQueueWaitIdle
     static bool dispatch(const VulkanContext& ctx, const VulkanFunction& fn,
                          VkDescriptorSet set,
                          uint32_t gx, uint32_t gy = 1, uint32_t gz = 1)
     {
         return dispatchVulkanBound(ctx, fn, set, gx, gy, gz);
+    }
+
+    // 异步：录制 → 提交（attach fence），立即返回
+    static bool dispatchAsync(const VulkanContext& ctx, const VulkanFunction& fn,
+                               VkDescriptorSet set,
+                               VkCommandBuffer cmd, VkFence fence,
+                               uint32_t gx, uint32_t gy = 1, uint32_t gz = 1)
+    {
+        return dispatchVulkanAsync(ctx, fn, set, cmd, fence, gx, gy, gz);
     }
 };
 #endif // SKL_HAS_VULKAN
@@ -160,13 +171,24 @@ public:
     ~KernelManager()
     {
 #ifdef SKL_HAS_VULKAN
-        if (vkCtx_ && vkPool_ != VK_NULL_HANDLE)
-            vkDestroyDescriptorPool(vkCtx_->device, vkPool_, nullptr);
-        if (vkCtx_)
+        if (vkCtx_) {
+            // 若有异步 dispatch 尚未完成，等待后再销毁资源
+            if (vkAsyncPending_)
+                vkWaitForFences(vkCtx_->device, 1, &vkAsyncFence_, VK_TRUE, UINT64_MAX);
+            if (vkAsyncFence_ != VK_NULL_HANDLE)
+                vkDestroyFence(vkCtx_->device, vkAsyncFence_, nullptr);
+            // vkAsyncCmd_ 随 commandPool 一起释放，无需单独 free
+            if (vkPool_ != VK_NULL_HANDLE)
+                vkDestroyDescriptorPool(vkCtx_->device, vkPool_, nullptr);
             unloadVulkanFunction(vkFn_, vkCtx_->device);
+        }
         // vkCtx_ 非拥有，不销毁
 #endif
 #ifdef SKL_HAS_CUDA_DRIVER
+        if (cudaStream_) {
+            cuStreamSynchronize(cudaStream_);
+            cuStreamDestroy(cudaStream_);
+        }
         unloadCUDAFunction(cudaFn_);
 #endif
     }
@@ -193,7 +215,21 @@ public:
     {
         vkCtx_ = &ctx;
         vkFn_  = KernelFactory<KernelID, Vulkan>::get(ctx);
-        return vkFn_.pipeline != VK_NULL_HANDLE;
+        if (vkFn_.pipeline == VK_NULL_HANDLE) return false;
+
+        // 为异步 dispatch 预分配独立的 command buffer + fence
+        VkCommandBufferAllocateInfo cmdAI{};
+        cmdAI.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cmdAI.commandPool        = ctx.commandPool;
+        cmdAI.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cmdAI.commandBufferCount = 1;
+        vkAllocateCommandBuffers(ctx.device, &cmdAI, &vkAsyncCmd_);
+
+        VkFenceCreateInfo fenceCI{};
+        fenceCI.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;  // 初始 unsignaled
+        vkCreateFence(ctx.device, &fenceCI, nullptr, &vkAsyncFence_);
+
+        return true;
     }
 
     // 绑定（或重新绑定）buffer，内部重建 VkDescriptorPool + VkDescriptorSet
@@ -213,7 +249,10 @@ public:
     bool initCUDA()
     {
         cudaFn_ = KernelFactory<KernelID, CUDA>::get();
-        return cudaFn_.module != nullptr;
+        if (cudaFn_.module == nullptr) return false;
+        // 为异步 dispatch 创建独立 stream（non-blocking，不与默认流隐式同步）
+        cuStreamCreate(&cudaStream_, CU_STREAM_NON_BLOCKING);
+        return true;
     }
 
     // 绑定（或重新绑定）显存指针列表，顺序与 kernel 参数顺序一致
@@ -228,8 +267,7 @@ public:
     bool cudaReady() const { return cudaFn_.module != nullptr; }
 #endif // SKL_HAS_CUDA_DRIVER
 
-    // ── 统一 dispatch 接口 ────────────────────────────────────────────────────
-    // 所有 backend 签名完全一致：dispatch<Backend>(gx, gy, gz)
+    // ── 同步 dispatch（返回时 GPU 已完成）────────────────────────────────────
     template<typename Backend = CPU>
     bool dispatch(uint32_t gx, uint32_t gy = 1, uint32_t gz = 1)
     {
@@ -241,6 +279,7 @@ public:
 #ifdef SKL_HAS_VULKAN
         else if constexpr (std::is_same_v<Backend, Vulkan>)
         {
+            // 使用 ctx 共享的 dispatchCmd，同步（vkQueueWaitIdle）
             return KernelRunner<KernelID, Vulkan>::dispatch(
                 *vkCtx_, vkFn_, vkSet_, gx, gy, gz);
         }
@@ -248,8 +287,81 @@ public:
 #ifdef SKL_HAS_CUDA_DRIVER
         else if constexpr (std::is_same_v<Backend, CUDA>)
         {
-            return KernelRunner<KernelID, CUDA>::dispatch(
+            // 在默认流上 launch，然后同步等待
+            bool ok = KernelRunner<KernelID, CUDA>::dispatch(
                 cudaFn_, cudaKernelArgs_.data(), gx, gy, gz);
+            if (ok) cuStreamSynchronize(nullptr);
+            return ok;
+        }
+#endif
+        return false;
+    }
+
+    // ── 异步 dispatch（立即返回，GPU 在后台执行，调用 sync<Backend>() 等待）──
+    // CPU：等同 dispatch（无异步概念）
+    // Vulkan：使用每个 manager 独立的 cmd + fence，submit 后立即返回
+    // CUDA：在内部 stream 上 launch 后立即返回
+    template<typename Backend = CPU>
+    bool dispatchAsync(uint32_t gx, uint32_t gy = 1, uint32_t gz = 1)
+    {
+        if constexpr (std::is_same_v<Backend, CPU>)
+        {
+            KernelRunner<KernelID, CPU>::dispatch(cpuFn_, cpuParams_, gx, gy, gz);
+            return true;
+        }
+#ifdef SKL_HAS_VULKAN
+        else if constexpr (std::is_same_v<Backend, Vulkan>)
+        {
+            // 若上次 async dispatch 未完成，先等待（保证 cmd/fence 空闲）
+            if (vkAsyncPending_)
+            {
+                vkWaitForFences(vkCtx_->device, 1, &vkAsyncFence_, VK_TRUE, UINT64_MAX);
+                vkResetFences(vkCtx_->device, 1, &vkAsyncFence_);
+                vkAsyncPending_ = false;
+            }
+            bool ok = KernelRunner<KernelID, Vulkan>::dispatchAsync(
+                *vkCtx_, vkFn_, vkSet_, vkAsyncCmd_, vkAsyncFence_, gx, gy, gz);
+            if (ok) vkAsyncPending_ = true;
+            return ok;
+        }
+#endif
+#ifdef SKL_HAS_CUDA_DRIVER
+        else if constexpr (std::is_same_v<Backend, CUDA>)
+        {
+            return KernelRunner<KernelID, CUDA>::dispatch(
+                cudaFn_, cudaKernelArgs_.data(), gx, gy, gz,
+                64, 1, 1, cudaStream_);   // 在内部 stream 上 launch，立即返回
+        }
+#endif
+        return false;
+    }
+
+    // ── 同步点：等待 dispatchAsync 提交的 GPU 工作完成 ─────────────────────────
+    // CPU：空操作
+    // Vulkan：vkWaitForFences + 重置 fence
+    // CUDA：cuStreamSynchronize
+    template<typename Backend = CPU>
+    bool sync()
+    {
+        if constexpr (std::is_same_v<Backend, CPU>)
+        {
+            return true;   // CPU dispatch 本身已同步
+        }
+#ifdef SKL_HAS_VULKAN
+        else if constexpr (std::is_same_v<Backend, Vulkan>)
+        {
+            if (!vkAsyncPending_) return true;
+            VkResult r = vkWaitForFences(
+                vkCtx_->device, 1, &vkAsyncFence_, VK_TRUE, UINT64_MAX);
+            vkResetFences(vkCtx_->device, 1, &vkAsyncFence_);
+            vkAsyncPending_ = false;
+            return r == VK_SUCCESS;
+        }
+#endif
+#ifdef SKL_HAS_CUDA_DRIVER
+        else if constexpr (std::is_same_v<Backend, CUDA>)
+        {
+            return cuStreamSynchronize(cudaStream_) == CUDA_SUCCESS;
         }
 #endif
         return false;
@@ -261,16 +373,21 @@ private:
     void*       cpuParams_ = nullptr;
 
 #ifdef SKL_HAS_VULKAN
-    const VulkanContext* vkCtx_  = nullptr;       // 非拥有，生命周期由调用方保证
+    const VulkanContext* vkCtx_         = nullptr;       // 非拥有，生命周期由调用方保证
     VulkanFunction       vkFn_{};
-    VkDescriptorPool     vkPool_ = VK_NULL_HANDLE;
-    VkDescriptorSet      vkSet_  = VK_NULL_HANDLE;
+    VkDescriptorPool     vkPool_         = VK_NULL_HANDLE;
+    VkDescriptorSet      vkSet_          = VK_NULL_HANDLE;
+    // 异步 dispatch 专用资源（initVulkan 时分配，与 ctx.dispatchCmd 相互独立）
+    VkCommandBuffer      vkAsyncCmd_     = VK_NULL_HANDLE;
+    VkFence              vkAsyncFence_   = VK_NULL_HANDLE;
+    bool                 vkAsyncPending_ = false;         // 是否有未完成的 async dispatch
 #endif
 
 #ifdef SKL_HAS_CUDA_DRIVER
     CUDAFunction       cudaFn_{};
     std::vector<void*> cudaDevicePtrs_;
     std::vector<void*> cudaKernelArgs_;
+    CUstream           cudaStream_ = nullptr;             // 异步 dispatch 专用 stream
 #endif
 };
 
@@ -348,6 +465,19 @@ public:
     }
 #endif
 
+    // 等待 registry 中所有 kernel 的异步 dispatch 完成（全局同步点）
+    // 等价于对每个 manager 调用 sync<Backend>()，返回所有结果的 AND
+    template<typename Backend>
+    bool syncAll()
+    {
+        bool ok = true;
+        std::apply([&ok](auto&... mgrs)
+        {
+            ((ok &= mgrs.template sync<Backend>()), ...);
+        }, managers_);
+        return ok;
+    }
+
 private:
     std::tuple<KernelManager<KernelIDs>...> managers_;
 };
@@ -369,6 +499,33 @@ struct KernelLauncher
     {
         return registry.template get<KernelID>().template dispatch<Backend>(gx, gy, gz);
     }
+
+    template<auto... KernelIDs>
+    static bool dispatchAsync(KernelRegistry<KernelIDs...>& registry,
+                               uint32_t gx, uint32_t gy = 1, uint32_t gz = 1)
+    {
+        return registry.template get<KernelID>().template dispatchAsync<Backend>(gx, gy, gz);
+    }
+
+    template<auto... KernelIDs>
+    static bool sync(KernelRegistry<KernelIDs...>& registry)
+    {
+        return registry.template get<KernelID>().template sync<Backend>();
+    }
 };
+
+// ── 全局同步自由函数 ───────────────────────────────────────────────────────────
+// 等待 registry 中所有 kernel 的 dispatchAsync 完成，等价于 cudaDeviceSynchronize。
+//
+// 用法示例:
+//   skl::KernelLauncher<SlangKernelID::kernel,  Vulkan>::dispatchAsync(registry, gx);
+//   skl::KernelLauncher<SlangKernelID::addVec,  Vulkan>::dispatchAsync(registry, gx);
+//   skl::syncAll<skl::Vulkan>(registry);   // 等待所有 kernel 完成
+//
+template<typename Backend, auto... KernelIDs>
+bool syncAll(KernelRegistry<KernelIDs...>& registry)
+{
+    return registry.template syncAll<Backend>();
+}
 
 } // namespace skl
