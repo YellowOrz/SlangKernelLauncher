@@ -79,6 +79,19 @@ if(APPLE)
             -isystem "${MACOS_SDK_PATH}/usr/include/c++/v1"
         )
     endif()
+
+    # ── Metal backend ────────────────────────────────────────────────────────
+    enable_language(OBJCXX)
+    find_library(METAL_FRAMEWORK     Metal       REQUIRED)
+    find_library(FOUNDATION_FRAMEWORK Foundation  REQUIRED)
+    target_compile_definitions(${PROJECT_NAME} PUBLIC SKL_HAS_METAL)
+    target_sources(${PROJECT_NAME} PRIVATE src/MetalBackend.mm)
+    set_source_files_properties(src/MetalBackend.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(${PROJECT_NAME} PUBLIC
+        "${METAL_FRAMEWORK}"
+        "${FOUNDATION_FRAMEWORK}"
+        objc                     # ARC runtime (objc_storeStrong etc.)
+    )
 endif()
 
 # ── 测试 ──────────────────────────────────────────────────────────────────────
@@ -104,6 +117,15 @@ if(Vulkan_FOUND)
     target_link_libraries(test_vulkan_kernel PRIVATE ${PROJECT_NAME})
     target_include_directories(test_vulkan_kernel PRIVATE ${SLANG_GENERATED_DIR})
     add_test(NAME VulkanKernelTest COMMAND test_vulkan_kernel)
+endif()
+
+# ── Metal kernel 测试 ──────────────────────────────────────────────────────────
+if(APPLE)
+    add_executable(test_metal_kernel tests/test_metal_kernel.cpp)
+    add_dependencies(test_metal_kernel SlangKernelHeaders)
+    target_link_libraries(test_metal_kernel PRIVATE ${PROJECT_NAME})
+    target_include_directories(test_metal_kernel PRIVATE ${SLANG_GENERATED_DIR})
+    add_test(NAME MetalKernelTest COMMAND test_metal_kernel)
 endif()
 
 # ── 安装规则 ──────────────────────────────────────────────────────────────────

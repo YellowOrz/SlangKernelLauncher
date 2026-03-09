@@ -214,7 +214,8 @@ static bool writeCpuHeader(const char*                   outPath,
                             const std::string&            baseName,
                             const char*                   entryPoint,
                             slang::IComponentType*        program,
-                            unsigned*                     outBindingCount = nullptr)
+                            unsigned*                     outBindingCount = nullptr,
+                            SlangUInt*                    outTGS          = nullptr)
 {
     slang::ProgramLayout* reflection = program->getLayout();
     if (!reflection)
@@ -230,6 +231,7 @@ static bool writeCpuHeader(const char*                   outPath,
         auto* ep = reflection->getEntryPointByIndex(0);
         if (ep) ep->getComputeThreadGroupSize(3, tgs);
     }
+    if (outTGS) { outTGS[0] = tgs[0]; outTGS[1] = tgs[1]; outTGS[2] = tgs[2]; }
 
     // 全局参数结构体字段（反射）
     // isResource=true 时，生成 { T* data; size_t count; } 匹配 Slang prelude 的 RWStructuredBuffer layout
@@ -364,7 +366,10 @@ static bool writeCpuHeader(const char*                   outPath,
 
 static bool writeFactoryHeader(const char*        outPath,
                                 const std::string& baseName,
-                                unsigned           bindingCount)
+                                unsigned           bindingCount,
+                                unsigned           tgsX = 64,
+                                unsigned           tgsY = 1,
+                                unsigned           tgsZ = 1)
 {
     std::ofstream f(outPath);
     if (!f.is_open())
@@ -389,6 +394,9 @@ static bool writeFactoryHeader(const char*        outPath,
       // VulkanBackend.h must be included BEFORE namespace skl to avoid skl::skl:: nesting
       << "#if defined(SKL_HAS_VULKAN)\n"
       << "#include \"VulkanBackend.h\"\n"
+      << "#endif\n"
+      << "#if defined(SKL_HAS_METAL)\n"
+      << "#include \"MetalBackend.h\"\n"
       << "#endif\n\n"
       << "namespace skl {\n\n"
       // CPU specialization — always present (cpp target is always compiled)
@@ -418,6 +426,17 @@ static bool writeFactoryHeader(const char*        outPath,
       // Slang always renames the entry point to "main" when targeting SPIR-V
       << "        return loadVulkanFunction(::" << baseName << "_vulkan_kernel, ctx, "
       << bindingCount << "u, \"main\");\n"
+      << "    }\n"
+      << "};\n"
+      << "#endif\n\n"
+      // Metal specialization — conditional on Apple + MSL blob
+      << "#if defined(SKL_HAS_METAL) && defined(SLANG_HAS_" << nameUpper << "_METAL)\n"
+      << "template<>\n"
+      << "struct KernelFactory<SlangKernelID::" << baseName << ", Metal> {\n"
+      << "    static MetalFunction get(const MetalContext& ctx) {\n"
+      << "        return loadMetalFunction(::" << baseName << "_metal_kernel, ctx, "
+      << bindingCount << "u, \"" << baseName << "\", "
+      << tgsX << "u, " << tgsY << "u, " << tgsZ << "u);\n"
       << "    }\n"
       << "};\n"
       << "#endif\n\n"
@@ -605,10 +624,12 @@ int main(int argc, char* argv[])
                 if (d != std::string::npos) factoryHeaderPath = factoryHeaderPath.substr(0, d);
                 factoryHeaderPath += "_factory.h";
             }
-            unsigned bindingCount = 0;
-            writeCpuHeader(cpuHeaderPath.c_str(), baseName, entryPoint, cpuProgram, &bindingCount);
-            writeFactoryHeader(factoryHeaderPath.c_str(), baseName, bindingCount);
-
+            unsigned  bindingCount = 0;
+            SlangUInt tgs[3]       = { 64, 1, 1 };
+            writeCpuHeader(cpuHeaderPath.c_str(), baseName, entryPoint, cpuProgram,
+                           &bindingCount, tgs);
+            writeFactoryHeader(factoryHeaderPath.c_str(), baseName, bindingCount,
+                               (unsigned)tgs[0], (unsigned)tgs[1], (unsigned)tgs[2]);
             fprintf(stdout, "[SlangCompiler]   cpp (CPU): %s + %s + %s (%zu bytes)\n",
                     cpuCppPath.c_str(),
                     cpuHeaderPath.c_str(),

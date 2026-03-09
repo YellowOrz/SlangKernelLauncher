@@ -401,3 +401,76 @@ private:
 } // namespace skl
 
 #endif // SKL_HAS_CUDA_DRIVER
+
+// ── Metal specialization ──────────────────────────────────────────────────────
+#ifdef SKL_HAS_METAL
+
+namespace skl {
+
+// Apple Silicon 始终为统一内存（MTLResourceStorageModeShared）：
+//   MTLBuffer.contents 对 CPU 和 GPU 均可见，始终 coherent。
+//   upload/download = memcpy to/from contents；async ≡ sync；sync() = 空操作。
+//
+// metalBuffer() 返回 MetalBuffer*，供 KernelManager::bindMetal() 使用。
+template<typename T>
+class MemBuffer<T, Metal> : public IMemBuffer<T>
+{
+public:
+    // ctx 的生命周期必须超过 MemBuffer 自身
+    MemBuffer(const MetalContext& ctx, size_t count)
+        : ctx_(&ctx), count_(count)
+        , buf_(createMetalBuffer(ctx, count * sizeof(T)))
+    {}
+
+    ~MemBuffer()
+    {
+        if (ctx_) destroyMetalBuffer(buf_);
+    }
+
+    MemBuffer(const MemBuffer&)            = delete;
+    MemBuffer& operator=(const MemBuffer&) = delete;
+
+    size_t size() const override { return count_; }
+
+    // 供 KernelManager::bindMetal() 使用
+    MetalBuffer* metalBuffer() { return &buf_; }
+
+    // ── 同步传输 ─────────────────────────────────────────────────────────────
+    void upload(const T* src, size_t n) override
+    {
+        void* p = mapMetalBuffer(buf_);
+        memcpy(p, src, n * sizeof(T));
+        // MTLResourceStorageModeShared：无需 unmap，写入立即对 GPU 可见
+    }
+    void upload(const std::vector<T>& v) override { upload(v.data(), v.size()); }
+
+    void download(T* dst, size_t n) const override
+    {
+        const void* p = mapMetalBuffer(buf_);
+        memcpy(dst, p, n * sizeof(T));
+    }
+    void download(std::vector<T>& v) const override
+    {
+        v.resize(count_);
+        download(v.data(), count_);
+    }
+
+    // ── 异步传输（统一内存始终 coherent，等同同步）────────────────────────────
+    void uploadAsync(const T* src, size_t n) override   { upload(src, n); }
+    void uploadAsync(const std::vector<T>& v) override  { upload(v); }
+
+    void downloadAsync(T* dst, size_t n) const override   { download(dst, n); }
+    void downloadAsync(std::vector<T>& v) const override  { download(v); }
+
+    // ── 同步点（统一内存无需同步）────────────────────────────────────────────
+    void sync() const override {}
+
+private:
+    const MetalContext* ctx_   = nullptr;
+    size_t              count_ = 0;
+    MetalBuffer         buf_{};
+};
+
+} // namespace skl
+
+#endif // SKL_HAS_METAL

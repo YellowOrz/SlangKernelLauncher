@@ -33,6 +33,7 @@ namespace skl {
 struct CPU    {};   // CPU 软件执行
 struct CUDA   {};   // CUDA Driver API（需要 CUDAToolkit）
 struct Vulkan {};   // Vulkan compute
+struct Metal  {};   // Metal compute（仅 Apple）
 
 // ── CPU backend ───────────────────────────────────────────────────────────────
 using CPUFunction = std::function<void(ComputeVaryingInput*, void*, void*)>;
@@ -108,6 +109,11 @@ struct KernelRunner<KernelID, CUDA>
 #include "VulkanBackend.h"
 #endif
 
+// ── Metal include（同上，保持 namespace 干净）─────────────────────────────────
+#ifdef SKL_HAS_METAL
+#include "MetalBackend.h"
+#endif
+
 namespace skl {
 
 // ── Vulkan KernelRunner ───────────────────────────────────────────────────────
@@ -133,6 +139,30 @@ struct KernelRunner<KernelID, Vulkan>
     }
 };
 #endif // SKL_HAS_VULKAN
+
+// ── Metal KernelRunner ────────────────────────────────────────────────────────
+#ifdef SKL_HAS_METAL
+template<auto KernelID>
+struct KernelRunner<KernelID, Metal>
+{
+    // 同步：encode → commit → waitUntilCompleted
+    static bool dispatch(const MetalContext& ctx, const MetalFunction& fn,
+                         const std::vector<MetalBuffer*>& buffers,
+                         uint32_t gx, uint32_t gy = 1, uint32_t gz = 1)
+    {
+        return dispatchMetal(ctx, fn, buffers, gx, gy, gz);
+    }
+
+    // 异步：encode → commit，立即返回；outCmdBuf 由调用方 wait + release
+    static bool dispatchAsync(const MetalContext& ctx, const MetalFunction& fn,
+                               const std::vector<MetalBuffer*>& buffers,
+                               void** outCmdBuf,
+                               uint32_t gx, uint32_t gy = 1, uint32_t gz = 1)
+    {
+        return dispatchMetalAsync(ctx, fn, buffers, outCmdBuf, gx, gy, gz);
+    }
+};
+#endif // SKL_HAS_METAL
 
 // ── KernelManager ─────────────────────────────────────────────────────────────
 // 统一管理所有 backend 的资源生命周期与 buffer 绑定。
@@ -183,6 +213,17 @@ public:
             unloadVulkanFunction(vkFn_, vkCtx_->device);
         }
         // vkCtx_ 非拥有，不销毁
+#endif
+#ifdef SKL_HAS_METAL
+        if (metalCtx_) {
+            if (metalAsyncPending_) {
+                waitMetalCommandBuffer(metalAsyncCmd_);
+                releaseMetalCommandBuffer(metalAsyncCmd_);
+                metalAsyncCmd_ = nullptr;
+            }
+            unloadMetalFunction(metalFn_);
+        }
+        // metalCtx_ 非拥有，不销毁
 #endif
 #ifdef SKL_HAS_CUDA_DRIVER
         if (cudaStream_) {
@@ -243,6 +284,25 @@ public:
     bool vulkanReady() const { return vkCtx_ && vkFn_.pipeline != VK_NULL_HANDLE; }
 #endif // SKL_HAS_VULKAN
 
+    // ── Metal ────────────────────────────────────────────────────────────────
+#ifdef SKL_HAS_METAL
+    // 初始化 Metal backend，持有外部 ctx 的非拥有指针，ctx 生命周期由调用方保证
+    bool initMetal(const MetalContext& ctx)
+    {
+        metalCtx_ = &ctx;
+        metalFn_  = KernelFactory<KernelID, Metal>::get(ctx);
+        return metalFn_.pipelineState != nullptr;
+    }
+
+    // 绑定（或重新绑定）buffer 列表，Metal 在 encode 时直接使用
+    void bindMetal(const std::vector<MetalBuffer*>& buffers)
+    {
+        metalBuffers_ = buffers;
+    }
+
+    bool metalReady() const { return metalCtx_ && metalFn_.pipelineState != nullptr; }
+#endif // SKL_HAS_METAL
+
     // ── CUDA ─────────────────────────────────────────────────────────────────
 #ifdef SKL_HAS_CUDA_DRIVER
     // 加载 CUDA 模块（需外部已完成 cuInit / cuCtxCreate）
@@ -282,6 +342,13 @@ public:
             // 使用 ctx 共享的 dispatchCmd，同步（vkQueueWaitIdle）
             return KernelRunner<KernelID, Vulkan>::dispatch(
                 *vkCtx_, vkFn_, vkSet_, gx, gy, gz);
+        }
+#endif
+#ifdef SKL_HAS_METAL
+        else if constexpr (std::is_same_v<Backend, Metal>)
+        {
+            return KernelRunner<KernelID, Metal>::dispatch(
+                *metalCtx_, metalFn_, metalBuffers_, gx, gy, gz);
         }
 #endif
 #ifdef SKL_HAS_CUDA_DRIVER
@@ -325,6 +392,23 @@ public:
             return ok;
         }
 #endif
+#ifdef SKL_HAS_METAL
+        else if constexpr (std::is_same_v<Backend, Metal>)
+        {
+            // 若有未完成的 async dispatch，先等待并释放
+            if (metalAsyncPending_)
+            {
+                waitMetalCommandBuffer(metalAsyncCmd_);
+                releaseMetalCommandBuffer(metalAsyncCmd_);
+                metalAsyncCmd_    = nullptr;
+                metalAsyncPending_ = false;
+            }
+            bool ok = KernelRunner<KernelID, Metal>::dispatchAsync(
+                *metalCtx_, metalFn_, metalBuffers_, &metalAsyncCmd_, gx, gy, gz);
+            if (ok) metalAsyncPending_ = true;
+            return ok;
+        }
+#endif
 #ifdef SKL_HAS_CUDA_DRIVER
         else if constexpr (std::is_same_v<Backend, CUDA>)
         {
@@ -358,6 +442,17 @@ public:
             return r == VK_SUCCESS;
         }
 #endif
+#ifdef SKL_HAS_METAL
+        else if constexpr (std::is_same_v<Backend, Metal>)
+        {
+            if (!metalAsyncPending_) return true;
+            bool ok = waitMetalCommandBuffer(metalAsyncCmd_);
+            releaseMetalCommandBuffer(metalAsyncCmd_);
+            metalAsyncCmd_    = nullptr;
+            metalAsyncPending_ = false;
+            return ok;
+        }
+#endif
 #ifdef SKL_HAS_CUDA_DRIVER
         else if constexpr (std::is_same_v<Backend, CUDA>)
         {
@@ -381,6 +476,14 @@ private:
     VkCommandBuffer      vkAsyncCmd_     = VK_NULL_HANDLE;
     VkFence              vkAsyncFence_   = VK_NULL_HANDLE;
     bool                 vkAsyncPending_ = false;         // 是否有未完成的 async dispatch
+#endif
+
+#ifdef SKL_HAS_METAL
+    const MetalContext*       metalCtx_         = nullptr;   // 非拥有
+    MetalFunction             metalFn_{};
+    std::vector<MetalBuffer*> metalBuffers_;
+    void*                     metalAsyncCmd_     = nullptr;  // 已提交的 MTLCommandBuffer（retained）
+    bool                      metalAsyncPending_ = false;
 #endif
 
 #ifdef SKL_HAS_CUDA_DRIVER
@@ -454,6 +557,14 @@ public:
     void initAllVulkan(const VulkanContext& ctx)
     {
         std::apply([&ctx](auto&... mgrs) { (mgrs.initVulkan(ctx), ...); }, managers_);
+    }
+#endif
+
+#ifdef SKL_HAS_METAL
+    // 批量初始化所有 kernel 的 Metal backend（共享同一 ctx）
+    void initAllMetal(const MetalContext& ctx)
+    {
+        std::apply([&ctx](auto&... mgrs) { (mgrs.initMetal(ctx), ...); }, managers_);
     }
 #endif
 
