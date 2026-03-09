@@ -1,5 +1,7 @@
 # SlangKernelLauncher
 
+[English](README.md) | [中文](README_zh.md)
+
 A cross-platform GPU compute kernel launch framework built on [Slang](https://github.com/shader-slang/slang).
 Write a single `.slang` shader and run it on **CPU, Vulkan, Metal, and CUDA** — no per-platform shader maintenance required.
 
