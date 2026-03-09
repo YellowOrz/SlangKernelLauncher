@@ -7,23 +7,73 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
-# ── 查找 Slang SDK ────────────────────────────────────────────────────────────
-set(SLANG_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/slang")
+# ── 查找 / 自动下载 Slang SDK ─────────────────────────────────────────────────
+set(SLANG_VERSION   "2026.3.1")
+set(SLANG_SDK_DIR   "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/slang")
+set(_slang_config   "${SLANG_SDK_DIR}/lib/cmake/slang/slangConfig.cmake")
+
+if(NOT EXISTS "${_slang_config}")
+    message(STATUS "Slang SDK not found at ${SLANG_SDK_DIR} — downloading v${SLANG_VERSION}...")
+
+    # ── 平台/架构检测 ──────────────────────────────────────────────────────────
+    if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+        if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
+            set(_slang_platform "macos-aarch64")
+        else()
+            set(_slang_platform "macos-x86_64")
+        endif()
+        set(_slang_ext "zip")
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+        if(CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64|aarch64")
+            set(_slang_platform "windows-aarch64")
+        else()
+            set(_slang_platform "windows-x86_64")
+        endif()
+        set(_slang_ext "zip")
+    else()
+        if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
+            set(_slang_platform "linux-aarch64")
+        else()
+            set(_slang_platform "linux-x86_64")
+        endif()
+        set(_slang_ext "tar.gz")
+    endif()
+
+    set(_slang_url
+        "https://github.com/shader-slang/slang/releases/download/v${SLANG_VERSION}/slang-${SLANG_VERSION}-${_slang_platform}.${_slang_ext}"
+    )
+    set(_slang_archive
+        "${CMAKE_CURRENT_BINARY_DIR}/slang-${SLANG_VERSION}-${_slang_platform}.${_slang_ext}"
+    )
+
+    message(STATUS "  URL: ${_slang_url}")
+    file(DOWNLOAD "${_slang_url}" "${_slang_archive}"
+        SHOW_PROGRESS
+        STATUS  _dl_status
+        TLS_VERIFY ON
+    )
+    list(GET _dl_status 0 _dl_code)
+    if(NOT _dl_code EQUAL 0)
+        list(GET _dl_status 1 _dl_msg)
+        message(FATAL_ERROR "Failed to download Slang SDK: ${_dl_msg}\n  URL: ${_slang_url}")
+    endif()
+
+    file(MAKE_DIRECTORY "${SLANG_SDK_DIR}")
+    file(ARCHIVE_EXTRACT INPUT "${_slang_archive}" DESTINATION "${SLANG_SDK_DIR}")
+    file(REMOVE "${_slang_archive}")
+    message(STATUS "Slang SDK v${SLANG_VERSION} installed at ${SLANG_SDK_DIR}")
+endif()
 
 find_package(slang CONFIG
     PATHS "${SLANG_SDK_DIR}/lib/cmake/slang"
     NO_DEFAULT_PATH
-    QUIET
+    REQUIRED
 )
 
-if(slang_FOUND)
-    message(STATUS "Found Slang (thirdparty): ${SLANG_SDK_DIR}")
-    if(NOT TARGET Slang::Slang)
-        add_library(Slang::Slang ALIAS slang::slang)
-    endif()
-else()
-    find_package(Slang REQUIRED)
+if(NOT TARGET Slang::Slang)
+    add_library(Slang::Slang ALIAS slang::slang)
 endif()
+message(STATUS "Found Slang v${SLANG_VERSION} at ${SLANG_SDK_DIR}")
 
 # ── 环境检测：Vulkan / Metal / CUDA ──────────────────────────────────────────
 
