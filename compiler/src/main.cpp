@@ -213,7 +213,8 @@ static std::string slangTypeToCpp(slang::TypeReflection* type)
 static bool writeCpuHeader(const char*                   outPath,
                             const std::string&            baseName,
                             const char*                   entryPoint,
-                            slang::IComponentType*        program)
+                            slang::IComponentType*        program,
+                            unsigned*                     outBindingCount = nullptr)
 {
     slang::ProgramLayout* reflection = program->getLayout();
     if (!reflection)
@@ -258,6 +259,12 @@ static bool writeCpuHeader(const char*                   outPath,
             fields.push_back({ elemType, fname, isResource });
         }
     }
+
+    // 统计 resource binding 数量（Vulkan descriptor binding count）
+    unsigned bindingCount = 0;
+    for (const auto& fld : fields)
+        if (fld.isResource) ++bindingCount;
+    if (outBindingCount) *outBindingCount = bindingCount;
 
     // ── 写出头文件 ────────────────────────────────────────────────────────────
     std::ofstream f(outPath);
@@ -356,7 +363,8 @@ static bool writeCpuHeader(const char*                   outPath,
 // 此文件必须在 SlangKernelID 枚举定义之后被 include（由 slang_kernels.h 保证）。
 
 static bool writeFactoryHeader(const char*        outPath,
-                                const std::string& baseName)
+                                const std::string& baseName,
+                                unsigned           bindingCount)
 {
     std::ofstream f(outPath);
     if (!f.is_open())
@@ -377,7 +385,11 @@ static bool writeFactoryHeader(const char*        outPath,
       << "// Auto-generated KernelFactory specializations — DO NOT EDIT\n"
       << "// Source: " << baseName << ".slang\n"
       << "// NOTE: SlangKernelID must be defined before including this file (provided by slang_kernels.h)\n\n"
-      << "#include \"SlangKernelLauncher.h\"\n\n"
+      << "#include \"SlangKernelLauncher.h\"\n"
+      // VulkanBackend.h must be included BEFORE namespace skl to avoid skl::skl:: nesting
+      << "#if defined(SKL_HAS_VULKAN)\n"
+      << "#include \"VulkanBackend.h\"\n"
+      << "#endif\n\n"
       << "namespace skl {\n\n"
       // CPU specialization — always present (cpp target is always compiled)
       << "template<>\n"
@@ -394,6 +406,18 @@ static bool writeFactoryHeader(const char*        outPath,
       << "        loadCUDAFunction(::" << baseName << "_cuda_kernel, \""
       << baseName << "\", fn);\n"
       << "        return fn;\n"
+      << "    }\n"
+      << "};\n"
+      << "#endif\n\n"
+      // Vulkan specialization — conditional on Vulkan SDK + SPIR-V blob
+      << "#if defined(SKL_HAS_VULKAN) && defined(SLANG_HAS_" << nameUpper << "_VULKAN)\n"
+      << "template<>\n"
+      << "struct KernelFactory<SlangKernelID::" << baseName << ", Vulkan> {\n"
+      << "    // Returns a VulkanFunction; check .pipeline != VK_NULL_HANDLE for success\n"
+      << "    static VulkanFunction get(const VulkanContext& ctx) {\n"
+      // Slang always renames the entry point to "main" when targeting SPIR-V
+      << "        return loadVulkanFunction(::" << baseName << "_vulkan_kernel, ctx, "
+      << bindingCount << "u, \"main\");\n"
       << "    }\n"
       << "};\n"
       << "#endif\n\n"
@@ -581,8 +605,9 @@ int main(int argc, char* argv[])
                 if (d != std::string::npos) factoryHeaderPath = factoryHeaderPath.substr(0, d);
                 factoryHeaderPath += "_factory.h";
             }
-            writeCpuHeader(cpuHeaderPath.c_str(), baseName, entryPoint, cpuProgram);
-            writeFactoryHeader(factoryHeaderPath.c_str(), baseName);
+            unsigned bindingCount = 0;
+            writeCpuHeader(cpuHeaderPath.c_str(), baseName, entryPoint, cpuProgram, &bindingCount);
+            writeFactoryHeader(factoryHeaderPath.c_str(), baseName, bindingCount);
 
             fprintf(stdout, "[SlangCompiler]   cpp (CPU): %s + %s + %s (%zu bytes)\n",
                     cpuCppPath.c_str(),

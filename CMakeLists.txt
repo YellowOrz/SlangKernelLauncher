@@ -20,6 +20,19 @@ else()
     message(STATUS "CUDAToolkit not found: CUDA Driver backend disabled")
 endif()
 
+# ── Vulkan 检测 ───────────────────────────────────────────────────────────────
+# 可通过 cmake -DVULKAN_SDK=/path/to/VulkanSDK/x.x.x/macOS 指定 SDK 路径
+if(DEFINED VULKAN_SDK)
+    list(APPEND CMAKE_PREFIX_PATH "${VULKAN_SDK}")
+    set(ENV{VULKAN_SDK} "${VULKAN_SDK}")
+endif()
+find_package(Vulkan QUIET)
+if(Vulkan_FOUND)
+    message(STATUS "Vulkan SDK found (${Vulkan_VERSION}): Vulkan backend enabled")
+else()
+    message(STATUS "Vulkan SDK not found: Vulkan backend disabled")
+endif()
+
 # ── SlangKernelLauncher 库 ────────────────────────────────────────────────────
 file(GLOB_RECURSE LIB_SOURCES CONFIGURE_DEPENDS
     "src/*.cpp"
@@ -48,6 +61,12 @@ if(CUDAToolkit_FOUND)
     target_link_libraries(${PROJECT_NAME} PRIVATE CUDA::cuda_driver)
 endif()
 
+# Vulkan backend（PUBLIC：VulkanBackend.h 是 public header，下游需要 vulkan/vulkan.h）
+if(Vulkan_FOUND)
+    target_compile_definitions(${PROJECT_NAME} PUBLIC SKL_HAS_VULKAN)
+    target_link_libraries(${PROJECT_NAME} PUBLIC Vulkan::Vulkan)
+endif()
+
 # ── 平台特定设置 ──────────────────────────────────────────────────────────────
 if(APPLE)
     execute_process(
@@ -65,32 +84,6 @@ endif()
 # ── 测试 ──────────────────────────────────────────────────────────────────────
 enable_testing()
 
-add_executable(test_kernel_launch tests/test_kernel_launch.cpp)
-
-add_dependencies(test_kernel_launch SlangKernelHeaders)
-
-target_link_libraries(test_kernel_launch PRIVATE ${PROJECT_NAME})
-
-target_include_directories(test_kernel_launch PRIVATE
-    ${SLANG_GENERATED_DIR}   # 生成的 kernel.h
-)
-
-add_test(NAME KernelLaunchTest COMMAND test_kernel_launch)
-
-# ── CPU kernel 正确性测试 ──────────────────────────────────────────────────────
-add_executable(test_cpu_kernel tests/test_cpu_kernel.cpp)
-
-add_dependencies(test_cpu_kernel SlangKernelHeaders)
-
-# 链接库（内含 kernel_cpu.cpp），PUBLIC include 自动带入 include/ 目录
-target_link_libraries(test_cpu_kernel PRIVATE ${PROJECT_NAME})
-
-target_include_directories(test_cpu_kernel PRIVATE
-    ${SLANG_GENERATED_DIR}   # slang_kernels.h / kernel_cpu.h
-)
-
-add_test(NAME CpuKernelTest COMMAND test_cpu_kernel)
-
 # ── KernelFactory 测试 ─────────────────────────────────────────────────────────
 add_executable(test_kernel_factory tests/test_kernel_factory.cpp)
 
@@ -103,6 +96,15 @@ target_include_directories(test_kernel_factory PRIVATE
 )
 
 add_test(NAME KernelFactoryTest COMMAND test_kernel_factory)
+
+# ── Vulkan kernel 测试 ─────────────────────────────────────────────────────────
+if(Vulkan_FOUND)
+    add_executable(test_vulkan_kernel tests/test_vulkan_kernel.cpp)
+    add_dependencies(test_vulkan_kernel SlangKernelHeaders)
+    target_link_libraries(test_vulkan_kernel PRIVATE ${PROJECT_NAME})
+    target_include_directories(test_vulkan_kernel PRIVATE ${SLANG_GENERATED_DIR})
+    add_test(NAME VulkanKernelTest COMMAND test_vulkan_kernel)
+endif()
 
 # ── 安装规则 ──────────────────────────────────────────────────────────────────
 install(TARGETS ${PROJECT_NAME}

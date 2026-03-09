@@ -1,9 +1,9 @@
 // test_kernel_factory.cpp
-// 验证 KernelFactory<SlangKernelID::kernel, skl::CPU>::get() 返回的 CPUFunction
-// 能正确执行 kernel.slang：outputBuffer[i] = inputBuffer[i] * 2.0f
+// 验证 KernelManager / KernelRegistry / KernelLauncher 的 CPU dispatch
 
 #define SLANG_KERNEL_NAMES_IMPL
 #include "slang_kernels.h"
+#include "MemBuffer.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -25,99 +25,120 @@ static int g_failed = 0;
         }                                                                   \
     } while (0)
 
-// 辅助：用 CPUFunction 手动逐 group dispatch
-static void dispatchWithFactory(skl::CPUFunction& fn,
-                                 kernel_Params&    params,
-                                 uint32_t          groupCountX)
+// ── 1. KernelManager 基础正确性 ───────────────────────────────────────────────
+static void test_manager_cpu_basic()
 {
-    for (uint32_t g = 0; g < groupCountX; ++g)
-    {
-        ComputeVaryingInput vi{};
-        vi.startGroupID = { g, 0, 0 };
-        vi.endGroupID   = { g + 1, 1, 1 };
-        fn(&vi, nullptr, &params);
-    }
-}
-
-// ── 1. 基础正确性 ─────────────────────────────────────────────────────────────
-static void test_factory_basic()
-{
-    fprintf(stdout, "\n[TEST] KernelFactory<kernel, CPU>::get() basic (output[i] == input[i] * 2)\n");
-
-    auto fn = skl::KernelFactory<SlangKernelID::kernel, skl::CPU>::get();
+    fprintf(stdout, "\n[TEST] KernelManager CPU basic\n");
 
     const uint32_t groupCount = 4;
     const uint32_t elemCount  = groupCount * kernel_THREAD_GROUP_X;
 
-    std::vector<float> input(elemCount), output(elemCount, 0.f);
+    skl::MemBuffer<float, skl::CPU> inBuf(elemCount);
+    skl::MemBuffer<float, skl::CPU> outBuf(elemCount);
     for (uint32_t i = 0; i < elemCount; ++i)
-        input[i] = static_cast<float>(i + 1);
+        inBuf.data()[i] = static_cast<float>(i + 1);
 
     kernel_Params params;
-    params.inputBuffer  = { input.data(),  input.size()  };
-    params.outputBuffer = { output.data(), output.size() };
+    params.inputBuffer  = { inBuf.data(),  inBuf.size()  };
+    params.outputBuffer = { outBuf.data(), outBuf.size() };
 
-    dispatchWithFactory(fn, params, groupCount);
+    skl::KernelManager<SlangKernelID::kernel> mgr;
+    mgr.initCPU();
+    mgr.bindCPU(params);
+    mgr.dispatch<skl::CPU>(groupCount);
 
     bool ok = true;
     for (uint32_t i = 0; i < elemCount; ++i)
-    {
-        if (std::fabs(output[i] - input[i] * 2.f) > 1e-6f)
-        {
-            fprintf(stderr, "  Mismatch at [%u]: got %.6f, expected %.6f\n",
-                    i, output[i], input[i] * 2.f);
-            ok = false;
-        }
-    }
-    CHECK_MSG(ok, "256 elements (4 groups x 64): all output[i] == input[i] * 2");
+        if (std::fabs(outBuf.data()[i] - inBuf.data()[i] * 2.f) > 1e-6f)
+            { fprintf(stderr, "  [%u] got %.6f exp %.6f\n", i, outBuf.data()[i], inBuf.data()[i]*2.f); ok = false; }
+    CHECK_MSG(ok, "256 elements: output[i] == input[i] * 2");
 }
 
-// ── 2. factory 结果与 kernel_dispatch 一致 ────────────────────────────────────
-static void test_factory_matches_dispatch()
+// ── 2. KernelRegistry + KernelLauncher ───────────────────────────────────────
+static void test_launcher_via_registry()
 {
-    fprintf(stdout, "\n[TEST] KernelFactory result matches kernel_dispatch\n");
+    fprintf(stdout, "\n[TEST] KernelLauncher<kernel, CPU>::dispatch(registry, gx)\n");
 
-    const uint32_t groupCount = 3;
+    const uint32_t groupCount = 4;
     const uint32_t elemCount  = groupCount * kernel_THREAD_GROUP_X;
 
-    std::vector<float> input(elemCount);
+    skl::MemBuffer<float, skl::CPU> inBuf(elemCount);
+    skl::MemBuffer<float, skl::CPU> outBuf(elemCount);
     for (uint32_t i = 0; i < elemCount; ++i)
-        input[i] = static_cast<float>(i) * 0.5f - 64.f;
+        inBuf.data()[i] = static_cast<float>(i + 1);
 
-    std::vector<float> out_factory(elemCount, 0.f);
-    std::vector<float> out_dispatch(elemCount, 0.f);
+    kernel_Params params;
+    params.inputBuffer  = { inBuf.data(),  inBuf.size()  };
+    params.outputBuffer = { outBuf.data(), outBuf.size() };
 
-    // factory 路径：逐 group 调用 CPUFunction
-    {
-        auto fn = skl::KernelFactory<SlangKernelID::kernel, skl::CPU>::get();
-        kernel_Params p;
-        p.inputBuffer  = { input.data(), input.size() };
-        p.outputBuffer = { out_factory.data(), out_factory.size() };
-        dispatchWithFactory(fn, p, groupCount);
-    }
+    // Registry 统一管理所有 kernel 的资源
+    skl::KernelRegistry<SlangKernelID::kernel> registry;
+    registry.initAllCPU();
+    registry.get<SlangKernelID::kernel>().bindCPU(params);
 
-    // 直接 dispatch 路径
-    {
-        kernel_Params p;
-        p.inputBuffer  = { input.data(), input.size() };
-        p.outputBuffer = { out_dispatch.data(), out_dispatch.size() };
-        kernel_dispatch(p, groupCount);
-    }
+    // KernelLauncher 通过 registry 查找 manager 并 dispatch
+    skl::KernelLauncher<SlangKernelID::kernel, skl::CPU>::dispatch(registry, groupCount);
 
-    bool match = true;
+    bool ok = true;
     for (uint32_t i = 0; i < elemCount; ++i)
-    {
-        if (std::fabs(out_factory[i] - out_dispatch[i]) > 1e-6f)
-        {
-            fprintf(stderr, "  Diverge at [%u]: factory=%.6f, dispatch=%.6f\n",
-                    i, out_factory[i], out_dispatch[i]);
-            match = false;
-        }
-    }
-    CHECK_MSG(match, "factory and kernel_dispatch produce identical results");
+        if (std::fabs(outBuf.data()[i] - inBuf.data()[i] * 2.f) > 1e-6f)
+            { fprintf(stderr, "  [%u] got %.6f exp %.6f\n", i, outBuf.data()[i], inBuf.data()[i]*2.f); ok = false; }
+    CHECK_MSG(ok, "KernelLauncher via registry: output[i] == input[i] * 2");
 }
 
-// ── 3. 枚举名称表 ─────────────────────────────────────────────────────────────
+// ── 3. KernelManager rebind ───────────────────────────────────────────────────
+static void test_manager_rebind()
+{
+    fprintf(stdout, "\n[TEST] KernelManager CPU rebind buffers\n");
+
+    const uint32_t elemCount = kernel_THREAD_GROUP_X;
+
+    skl::MemBuffer<float, skl::CPU> in1(elemCount);
+    skl::MemBuffer<float, skl::CPU> in2(elemCount);
+    skl::MemBuffer<float, skl::CPU> out(elemCount);
+    in1.upload(std::vector<float>(elemCount, 1.f));
+    in2.upload(std::vector<float>(elemCount, 5.f));
+
+    skl::KernelManager<SlangKernelID::kernel> mgr;
+    mgr.initCPU();
+
+    kernel_Params p1;
+    p1.inputBuffer  = { in1.data(), in1.size() };
+    p1.outputBuffer = { out.data(), out.size() };
+    mgr.bindCPU(p1);
+    mgr.dispatch<skl::CPU>(1);
+    CHECK_MSG(std::fabs(out.data()[0] - 2.f) < 1e-6f, "first bind: in=1 -> out=2");
+
+    kernel_Params p2;
+    p2.inputBuffer  = { in2.data(), in2.size() };
+    p2.outputBuffer = { out.data(), out.size() };
+    mgr.bindCPU(p2);
+    mgr.dispatch<skl::CPU>(1);
+    CHECK_MSG(std::fabs(out.data()[0] - 10.f) < 1e-6f, "rebind: in=5 -> out=10");
+}
+
+// ── 4. MemBuffer upload/download 往返 ────────────────────────────────────────
+static void test_membuffer_roundtrip()
+{
+    fprintf(stdout, "\n[TEST] MemBuffer<float, CPU> upload/download roundtrip\n");
+
+    const size_t n = 128;
+    std::vector<float> src(n);
+    for (size_t i = 0; i < n; ++i) src[i] = static_cast<float>(i) * 1.5f - 64.f;
+
+    skl::MemBuffer<float, skl::CPU> buf(n);
+    buf.upload(src);
+
+    std::vector<float> dst;
+    buf.download(dst);
+
+    bool ok = (dst.size() == n);
+    for (size_t i = 0; i < n && ok; ++i)
+        ok = std::fabs(dst[i] - src[i]) < 1e-6f;
+    CHECK_MSG(ok, "upload then download returns identical data");
+}
+
+// ── 5. 枚举名称表 ─────────────────────────────────────────────────────────────
 static void test_kernel_names()
 {
     fprintf(stdout, "\n[TEST] slang_kernel_names[] table\n");
@@ -131,13 +152,14 @@ static void test_kernel_names()
 // ── main ──────────────────────────────────────────────────────────────────────
 int main()
 {
-    fprintf(stdout, "=== KernelFactory Tests ===\n");
+    fprintf(stdout, "=== KernelManager / KernelLauncher CPU Tests ===\n");
 
-    test_factory_basic();
-    test_factory_matches_dispatch();
+    test_manager_cpu_basic();
+    test_launcher_via_registry();
+    test_manager_rebind();
+    test_membuffer_roundtrip();
     test_kernel_names();
 
-    fprintf(stdout, "\n=== Results: %d passed, %d failed ===\n",
-            g_passed, g_failed);
+    fprintf(stdout, "\n=== Results: %d passed, %d failed ===\n", g_passed, g_failed);
     return g_failed > 0 ? EXIT_FAILURE : EXIT_SUCCESS;
 }
