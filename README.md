@@ -1,57 +1,57 @@
 # SlangKernelLauncher
 
-一个基于 [Slang](https://github.com/shader-slang/slang) 的跨平台 GPU Compute Kernel 启动框架。
-只需编写一份 `.slang` 着色器，即可在 **CPU、Vulkan、Metal、CUDA** 四个后端上运行，无需为每个平台维护独立的 shader 代码。
+A cross-platform GPU compute kernel launch framework built on [Slang](https://github.com/shader-slang/slang).
+Write a single `.slang` shader and run it on **CPU, Vulkan, Metal, and CUDA** — no per-platform shader maintenance required.
 
-## 特性
+## Features
 
-- **一次编写，四端运行** — Slang 编译器在构建期将 `.slang` 自动编译到 CPU(C++)、Vulkan(SPIR-V)、Metal(MSL)、CUDA(PTX)
-- **类型安全** — 全部通过 C++ 模板在编译期绑定 kernel、backend 和 buffer 类型，无运行期字符串查找
-- **统一异步模型** — 所有 backend 均提供 `dispatch()` / `dispatchAsync()` / `sync()` / `syncAll()` 接口
-- **自适应内存** — Vulkan 自动检测集成显卡（统一内存）与独显（staging buffer），Metal 始终为统一内存（Apple Silicon）
-- **自动下载依赖** — 首次 `cmake` 时自动从 GitHub 下载 Slang SDK，无需手动安装
+- **Write once, run everywhere** — the Slang compiler automatically transpiles `.slang` shaders at build time to CPU (C++), Vulkan (SPIR-V), Metal (MSL), and CUDA (PTX)
+- **Type-safe** — kernels, backends, and buffer types are all bound at compile time via C++ templates; no runtime string lookups
+- **Unified async model** — every backend exposes the same `dispatch()` / `dispatchAsync()` / `sync()` / `syncAll()` interface
+- **Adaptive memory** — Vulkan automatically detects integrated GPUs (unified memory) vs. discrete GPUs (staging buffers); Metal always uses unified memory on Apple Silicon
+- **Zero-install dependency** — the Slang SDK is downloaded automatically from GitHub on the first `cmake` run
 
-## 平台与依赖
+## Requirements
 
-| 组件 | 要求 |
-|------|------|
-| 编译器 | C++17，CMake ≥ 3.20 |
-| CPU backend | 无额外依赖（始终启用） |
-| Vulkan backend | Vulkan SDK（可选，自动检测） |
-| Metal backend | macOS（自动启用，需 Xcode Command Line Tools） |
-| CUDA backend | CUDA Toolkit（可选，自动检测） |
-| Slang SDK | 自动下载 v2026.3.1，无需手动安装 |
+| Component | Requirement |
+|-----------|-------------|
+| Compiler | C++17, CMake ≥ 3.20 |
+| CPU backend | No extra dependencies (always enabled) |
+| Vulkan backend | Vulkan SDK (optional, auto-detected) |
+| Metal backend | macOS with Xcode Command Line Tools (auto-enabled) |
+| CUDA backend | CUDA Toolkit (optional, auto-detected) |
+| Slang SDK | Auto-downloaded (v2026.3.1), no manual install needed |
 
-## 编译
+## Building
 
 ```bash
-# 1. 克隆仓库
+# 1. Clone the repository
 git clone <repo-url>
 cd SlangKernelLauncher
 
-# 2. 配置（首次运行会自动下载 Slang SDK，约 145 MB）
+# 2. Configure (downloads Slang SDK ~145 MB on first run)
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 
-# 3. 编译
+# 3. Build
 cmake --build build -j$(nproc)
 
-# 4. 运行测试
+# 4. Run tests
 cd build && ctest --output-on-failure
 ```
 
-> **Vulkan SDK**：若已安装 Vulkan SDK，CMake 会自动检测并启用 Vulkan backend。
-> 也可以通过 `-DVULKAN_SDK=/path/to/VulkanSDK/x.x.x/macOS` 手动指定路径。
+> **Vulkan SDK**: if installed, CMake detects it automatically and enables the Vulkan backend.
+> You can also point to it explicitly: `-DVULKAN_SDK=/path/to/VulkanSDK/x.x.x/macOS`
 
-生成的测试可执行文件位于 `build/` 下：
-- `test_kernel_factory` — CPU backend 基础测试
-- `test_vulkan_kernel` — Vulkan backend 测试（需要 Vulkan SDK）
-- `test_metal_kernel` — Metal backend 测试（仅 macOS）
+Test executables are placed under `build/`:
+- `test_kernel_factory` — CPU backend tests
+- `test_vulkan_kernel` — Vulkan backend tests (requires Vulkan SDK)
+- `test_metal_kernel` — Metal backend tests (macOS only)
 
-## 快速上手
+## Quick Start
 
-### 1. 编写 Slang Shader
+### 1. Write a Slang Shader
 
-在 `compiler/shaders/` 下新建 `myKernel.slang`：
+Create `myKernel.slang` in `compiler/shaders/`:
 
 ```hlsl
 // myKernel.slang
@@ -67,19 +67,19 @@ void myKernel(uint3 dispatchThreadID : SV_DispatchThreadID)
 }
 ```
 
-重新运行 `cmake --build build` 后，框架会自动生成：
-- `myKernel.h` — 各 backend 的二进制 blob（SPIR-V / MSL / PTX）
-- `myKernel_cpu.h / .cpp` — CPU 端 C++ 实现
-- `myKernel_factory.h` — `KernelFactory` 模板特化
+After re-running `cmake --build build`, the framework generates:
+- `myKernel.h` — per-backend binary blobs (SPIR-V / MSL / PTX)
+- `myKernel_cpu.h / .cpp` — CPU-side C++ implementation
+- `myKernel_factory.h` — `KernelFactory` template specializations
 
-### 2. 在 C++ 中使用
+### 2. Use It in C++
 
 ```cpp
 #define SLANG_KERNEL_NAMES_IMPL
-#include "slang_kernels.h"       // 聚合所有生成的 kernel 头文件
-#include "MemBuffer.h"           // 类型化 buffer 封装
+#include "slang_kernels.h"    // aggregates all generated kernel headers
+#include "MemBuffer.h"        // typed buffer wrapper
 
-// 声明要用的 kernel 组合
+// Declare the kernel set you need
 using Reg = skl::KernelRegistry<SlangKernelID::myKernel>;
 ```
 
@@ -104,7 +104,7 @@ std::vector<float> result;
 outBuf.download(result);  // result[i] == 3.0f
 ```
 
-#### Metal Backend（macOS）
+#### Metal Backend (macOS)
 
 ```cpp
 skl::MetalContext ctx = skl::createMetalContext();
@@ -151,143 +151,143 @@ outBuf.download(result);  // result[i] == 3.0f
 skl::destroyVulkanContext(ctx);
 ```
 
-### 3. 异步 Dispatch
+### 3. Async Dispatch
 
-所有 GPU backend 均支持异步 dispatch，可在 GPU 计算期间并行执行 CPU 工作：
+All GPU backends support async dispatch so CPU work can overlap with GPU execution:
 
 ```cpp
-// 提交异步任务（立即返回）
+// Submit and return immediately
 skl::KernelLauncher<SlangKernelID::myKernel, skl::Metal>::dispatchAsync(registry, N / 64);
 
-// CPU 侧并行计算...
+// Do CPU work in parallel...
 doCpuWork();
 
-// 等待 GPU 完成
+// Wait for GPU to finish
 skl::KernelLauncher<SlangKernelID::myKernel, skl::Metal>::sync(registry);
 ```
 
-同时提交多个 kernel 后统一等待：
+Submit multiple kernels and wait for all of them at once:
 
 ```cpp
 using Reg2 = skl::KernelRegistry<SlangKernelID::kernel, SlangKernelID::addVec>;
 Reg2 registry;
 registry.initAllMetal(ctx);
 
-// 绑定 + 异步提交两个 kernel
+// Bind and submit both kernels asynchronously
 registry.get<SlangKernelID::kernel>().bindMetal({ ... });
 registry.get<SlangKernelID::addVec>().bindMetal({ ... });
 
 skl::KernelLauncher<SlangKernelID::kernel,  skl::Metal>::dispatchAsync(registry, groupCount);
 skl::KernelLauncher<SlangKernelID::addVec,  skl::Metal>::dispatchAsync(registry, groupCount);
 
-// 一次等待所有 kernel 完成
+// Wait for all kernels in one call
 skl::syncAll<skl::Metal>(registry);
 ```
 
-## 项目结构
+## Project Structure
 
 ```
 SlangKernelLauncher/
-├── CMakeLists.txt               # 顶层构建配置
+├── CMakeLists.txt               # Top-level build configuration
 ├── compiler/
-│   ├── CMakeLists.txt           # SlangCompiler 构建 + SDK 自动下载
-│   ├── shaders/                 # .slang 着色器源文件（在此添加自定义 kernel）
-│   │   ├── kernel.slang         # 示例：input[i] * 2
-│   │   └── addVec.slang         # 示例：a[i] + b[i]
-│   └── src/main.cpp             # SlangCompiler 工具（构建期运行）
+│   ├── CMakeLists.txt           # SlangCompiler build + SDK auto-download
+│   ├── shaders/                 # .slang shader sources (add your kernels here)
+│   │   ├── kernel.slang         # Example: input[i] * 2
+│   │   └── addVec.slang         # Example: a[i] + b[i]
+│   └── src/main.cpp             # SlangCompiler tool (runs at build time)
 ├── include/
-│   ├── SlangKernelLauncher.h    # 核心框架（KernelManager / Registry / Launcher）
-│   ├── MemBuffer.h              # 类型化 buffer（CPU / Vulkan / Metal / CUDA）
-│   ├── MetalBackend.h           # Metal C++ API（纯 C++，无 ObjC 依赖）
+│   ├── SlangKernelLauncher.h    # Core framework (KernelManager / Registry / Launcher)
+│   ├── MemBuffer.h              # Typed buffer abstraction (CPU / Vulkan / Metal / CUDA)
+│   ├── MetalBackend.h           # Metal C++ API (pure C++, no ObjC headers exposed)
 │   └── VulkanBackend.h          # Vulkan C++ API
 ├── src/
-│   ├── MetalBackend.mm          # Metal ObjC++ 实现（-fobjc-arc）
-│   └── VulkanBackend.cpp        # Vulkan 实现
+│   ├── MetalBackend.mm          # Metal ObjC++ implementation (-fobjc-arc)
+│   └── VulkanBackend.cpp        # Vulkan implementation
 └── tests/
-    ├── test_kernel_factory.cpp  # CPU backend 测试
-    ├── test_vulkan_kernel.cpp   # Vulkan backend 测试
-    └── test_metal_kernel.cpp    # Metal backend 测试
+    ├── test_kernel_factory.cpp  # CPU backend tests
+    ├── test_vulkan_kernel.cpp   # Vulkan backend tests
+    └── test_metal_kernel.cpp    # Metal backend tests
 ```
 
-## 核心 API 速查
+## API Reference
 
-### Backend 标签类型
+### Backend Tag Types
 
 ```cpp
-skl::CPU     // CPU 软件执行
-skl::Vulkan  // Vulkan compute（需 SKL_HAS_VULKAN）
-skl::Metal   // Metal compute（需 SKL_HAS_METAL，仅 macOS）
-skl::CUDA    // CUDA Driver API（需 SKL_HAS_CUDA_DRIVER）
+skl::CPU     // Software execution on CPU
+skl::Vulkan  // Vulkan compute (requires SKL_HAS_VULKAN)
+skl::Metal   // Metal compute  (requires SKL_HAS_METAL, macOS only)
+skl::CUDA    // CUDA Driver API (requires SKL_HAS_CUDA_DRIVER)
 ```
 
 ### KernelRegistry
 
 ```cpp
-// 声明一组 kernel
+// Declare a set of kernels
 using Reg = skl::KernelRegistry<SlangKernelID::kernelA, SlangKernelID::kernelB>;
 Reg registry;
 
-// 批量初始化
+// Batch initialization
 registry.initAllCPU();
 registry.initAllMetal(ctx);
 registry.initAllVulkan(ctx);
 
-// 获取单个 KernelManager
+// Access a single KernelManager
 auto& mgr = registry.get<SlangKernelID::kernelA>();
 ```
 
 ### KernelLauncher
 
 ```cpp
-// 同步 dispatch（N 个线程组）
+// Synchronous dispatch (N thread groups)
 skl::KernelLauncher<SlangKernelID::kernelA, skl::Metal>::dispatch(registry, N);
 
-// 异步 dispatch
+// Asynchronous dispatch
 skl::KernelLauncher<SlangKernelID::kernelA, skl::Metal>::dispatchAsync(registry, N);
 
-// 等待单个 kernel 完成
+// Wait for a single kernel to finish
 skl::KernelLauncher<SlangKernelID::kernelA, skl::Metal>::sync(registry);
 
-// 等待 registry 中所有 kernel 完成
+// Wait for all kernels in the registry to finish
 skl::syncAll<skl::Metal>(registry);
 ```
 
 ### MemBuffer
 
 ```cpp
-// 构造
+// Construction
 skl::MemBuffer<float, skl::CPU>    cpuBuf(count);
 skl::MemBuffer<float, skl::Metal>  metalBuf(ctx, count);
 skl::MemBuffer<float, skl::Vulkan> vulkanBuf(ctx, count);
 
-// 上传 / 下载
+// Upload / download
 buf.upload(std::vector<float>{ ... });
 buf.upload(ptr, n);
 
 std::vector<float> out;
 buf.download(out);
 
-// 异步传输（CUDA 真异步，其他 backend 等同同步）
+// Async transfer (truly async on CUDA; equivalent to sync on other backends)
 buf.uploadAsync(ptr, n);
 buf.downloadAsync(out);
 buf.sync();
 
-// Backend 专属访问器（供 bind 使用）
-cpuBuf.data()           // T*
-metalBuf.metalBuffer()  // MetalBuffer*
+// Backend-specific accessors (used with bind calls)
+cpuBuf.data()            // T*
+metalBuf.metalBuffer()   // MetalBuffer*
 vulkanBuf.vulkanBuffer() // VulkanBuffer*
 ```
 
-## 添加新 Kernel
+## Adding a New Kernel
 
-1. 在 `compiler/shaders/` 下新建 `<name>.slang`，入口函数名与文件名保持一致
-2. 重新运行 `cmake -B build`（CMake 会检测到新文件并更新构建规则）
-3. 重新编译：`cmake --build build`
-4. 在代码中将 `SlangKernelID::<name>` 加入 `KernelRegistry` 模板参数列表
+1. Create `<name>.slang` in `compiler/shaders/` — the entry function name must match the file name
+2. Re-run `cmake -B build` (CMake detects the new file and updates the build rules)
+3. Rebuild: `cmake --build build`
+4. Add `SlangKernelID::<name>` to the `KernelRegistry` template argument list in your code
 
-## 已知限制
+## Known Limitations
 
-- 每个 `.slang` 文件只支持一个入口函数，且入口函数名必须与文件名相同
-- `[numthreads]` 只支持一维（X 轴），Y/Z 固定为 1
-- Metal backend 仅支持 Apple Silicon（统一内存），不支持 Intel Mac 独显
-- CUDA backend 仅使用 Driver API，不依赖 CUDA Runtime（`libcuda.so` / `cuda.dll`）
+- Each `.slang` file supports exactly one entry point, and its name must match the file name
+- `[numthreads]` is 1D only (X axis); Y and Z are fixed at 1
+- The Metal backend requires Apple Silicon (unified memory); Intel Mac discrete GPUs are not supported
+- The CUDA backend uses the Driver API only and does not depend on the CUDA Runtime (`libcuda.so` / `cuda.dll`)
