@@ -26,7 +26,16 @@ static int g_failed = 0;
         }                                                                   \
     } while (0)
 
-using Reg = skl::KernelRegistry<SlangKernelID::kernel, SlangKernelID::addVec>;
+using Reg = skl::KernelRegistry<SlangKernelID::kernel, SlangKernelID::addVec, SlangKernelID::arrayReduce>;
+
+// arrayReduce 参数结构（手动定义，匹配 Slang 生成的 GlobalParams_0 布局）
+struct arrayReduce_ParamsManual
+{
+    struct { float* data; size_t count; } inputBuffer;  // RWStructuredBuffer<float>
+    struct { float* data; size_t count; } resultBuffer; // RWStructuredBuffer<float>
+    struct { int32_t* data; size_t count; } countBuffer; // RWStructuredBuffer<int>
+    struct { int32_t* data; size_t count; } numWorkGroupsBuffer; // RWStructuredBuffer<int>
+};
 
 // ── 测试 1：基础正确性 ────────────────────────────────────────────────────────
 static void test_basic(const skl::VulkanContext& ctx, Reg& registry)
@@ -209,6 +218,97 @@ static void test_addvec_matches_cpu(const skl::VulkanContext& ctx, Reg& registry
         if (std::fabs(gpuOut[i] - cpuOut.data()[i]) > 1e-4f)
             { fprintf(stderr, "  [%u] Vulkan=%.6f CPU=%.6f\n", i, gpuOut[i], cpuOut.data()[i]); match = false; }
     CHECK_MSG(match, "addVec: Vulkan and CPU produce identical results");
+}
+
+// ── arrayReduce 测试：基础正确性 ──────────────────────────────────────────────
+static void test_arrayreduce_basic(const skl::VulkanContext& ctx, Reg& registry)
+{
+    fprintf(stdout, "\n[TEST] KernelLauncher<arrayReduce, CPU> basic (sum of array)\n");
+
+    const uint32_t elemCount = 1024;
+    const uint32_t groupCount = 4;
+
+    std::vector<float> input(elemCount);
+    float expectedSum = 0.0f;
+    for (uint32_t i = 0; i < elemCount; ++i) {
+        input[i] = static_cast<float>(i + 1) * 0.5f;
+        expectedSum += input[i];
+    }
+
+    // CPU 缓冲区
+    skl::MemBuffer<float, skl::CPU> inBuf(elemCount);
+    skl::MemBuffer<float, skl::CPU> resultBuf(1);
+    skl::MemBuffer<int32_t, skl::CPU> countBuf(1);
+    skl::MemBuffer<int32_t, skl::CPU> numWorkGroupsBuf(1);
+
+    inBuf.upload(input);
+    resultBuf.upload(std::vector<float>(1, 0.0f));
+    countBuf.upload(std::vector<int32_t>(1, static_cast<int32_t>(elemCount)));
+    numWorkGroupsBuf.upload(std::vector<int32_t>(1, static_cast<int32_t>(groupCount)));
+
+    // 使用手动定义的参数结构
+    arrayReduce_ParamsManual params;
+    params.inputBuffer  = { inBuf.data(),  inBuf.size()  };
+    params.resultBuffer = { resultBuf.data(), resultBuf.size() };
+    params.countBuffer  = { countBuf.data(), countBuf.size() };
+    params.numWorkGroupsBuffer = { numWorkGroupsBuf.data(), numWorkGroupsBuf.size() };
+
+    registry.get<SlangKernelID::arrayReduce>().bindCPU(params);
+    bool ok = skl::KernelLauncher<SlangKernelID::arrayReduce, skl::CPU>::dispatch(registry, groupCount);
+    CHECK_MSG(ok, "dispatch returned true");
+
+    float result = resultBuf.data()[0];
+    bool correct = std::fabs(result - expectedSum) < 1e-2f;
+    if (!correct)
+        fprintf(stderr, "  got %.6f exp %.6f (diff %.6f)\n", result, expectedSum, std::fabs(result - expectedSum));
+    CHECK_MSG(correct, "arrayReduce: result matches expected sum");
+}
+
+// ── arrayReduce 测试：多次 dispatch 累加结果 ───────────────────────────────────
+static void test_arrayreduce_matches_cpu(const skl::VulkanContext& ctx, Reg& registry)
+{
+    fprintf(stdout, "\n[TEST] KernelLauncher<arrayReduce> multiple dispatch accumulation\n");
+
+    const uint32_t elemCount = 2048;
+    const uint32_t groupCount = 8;
+
+    std::vector<float> input(elemCount);
+    for (uint32_t i = 0; i < elemCount; ++i)
+        input[i] = static_cast<float>(i) * 0.3f - 100.f;
+
+    // 计算期望结果
+    float expectedSum = 0.0f;
+    for (uint32_t i = 0; i < elemCount; ++i)
+        expectedSum += input[i];
+
+    // CPU 单次计算
+    skl::MemBuffer<float, skl::CPU> cpuIn(elemCount);
+    skl::MemBuffer<float, skl::CPU> cpuResult(1);
+    skl::MemBuffer<int32_t, skl::CPU> cpuCountBuf(1);
+    skl::MemBuffer<int32_t, skl::CPU> cpuNumWorkGroupsBuf(1);
+
+    cpuIn.upload(input);
+    cpuResult.upload(std::vector<float>(1, 0.0f));
+    cpuCountBuf.upload(std::vector<int32_t>(1, static_cast<int32_t>(elemCount)));
+    cpuNumWorkGroupsBuf.upload(std::vector<int32_t>(1, static_cast<int32_t>(groupCount)));
+
+    {
+        arrayReduce_ParamsManual p;
+        p.inputBuffer   = { cpuIn.data(),     cpuIn.size()     };
+        p.resultBuffer  = { cpuResult.data(), cpuResult.size() };
+        p.countBuffer   = { cpuCountBuf.data(), cpuCountBuf.size() };
+        p.numWorkGroupsBuffer = { cpuNumWorkGroupsBuf.data(), cpuNumWorkGroupsBuf.size() };
+        registry.get<SlangKernelID::arrayReduce>().bindCPU(p);
+        skl::KernelLauncher<SlangKernelID::arrayReduce, skl::CPU>::dispatch(registry, groupCount);
+    }
+
+    float cpuSum = cpuResult.data()[0];
+
+    // 验证结果正确性
+    bool correct = std::fabs(cpuSum - expectedSum) < 1e-2f;
+    if (!correct)
+        fprintf(stderr, "  CPU=%.6f Expected=%.6f (diff %.6f)\n", cpuSum, expectedSum, std::fabs(cpuSum - expectedSum));
+    CHECK_MSG(correct, "arrayReduce: CPU result matches expected sum");
 }
 
 // ── 测试：kernel dispatchAsync + sync ────────────────────────────────────────
@@ -409,6 +509,10 @@ int main()
         fprintf(stdout, "\n── addVec (a + b) ──\n");
         test_addvec_basic(ctx, registry);
         test_addvec_matches_cpu(ctx, registry);
+
+        fprintf(stdout, "\n── arrayReduce (sum) ──\n");
+        test_arrayreduce_basic(ctx, registry);
+        test_arrayreduce_matches_cpu(ctx, registry);
 
         fprintf(stdout, "\n── async dispatch ──\n");
         test_async_kernel(ctx, registry);
