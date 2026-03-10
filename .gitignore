@@ -2,4 +2,4 @@ build/
 .DS_Store
 compiler/slang
 compiler/thirdparty/slang/
-
+.idea

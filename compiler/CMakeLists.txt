@@ -10,7 +10,12 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 # ── 查找 / 自动下载 Slang SDK ─────────────────────────────────────────────────
 set(SLANG_VERSION   "2026.3.1")
 set(SLANG_SDK_DIR   "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/slang")
-set(_slang_config   "${SLANG_SDK_DIR}/lib/cmake/slang/slangConfig.cmake")
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    set(SLANG_CMAKE_DIR   "${SLANG_SDK_DIR}/cmake")
+else()
+    set(SLANG_CMAKE_DIR   "${SLANG_SDK_DIR}/lib/cmake/slang")
+endif()
+set(_slang_config   "${SLANG_CMAKE_DIR}/slangConfig.cmake")
 
 if(NOT EXISTS "${_slang_config}")
     message(STATUS "Slang SDK not found at ${SLANG_SDK_DIR} — downloading v${SLANG_VERSION}...")
@@ -65,7 +70,7 @@ if(NOT EXISTS "${_slang_config}")
 endif()
 
 find_package(slang CONFIG
-    PATHS "${SLANG_SDK_DIR}/lib/cmake/slang"
+    PATHS "${SLANG_CMAKE_DIR}"
     NO_DEFAULT_PATH
     REQUIRED
 )
